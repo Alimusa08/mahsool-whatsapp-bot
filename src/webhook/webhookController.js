@@ -16,6 +16,7 @@ function verifyWebhook(req, res) {
 
 // POST — actual incoming message/status events
 async function receiveEvent(req, res) {
+  console.log(`Webhook hit at ${new Date().toISOString()}`);
   // Respond immediately — Meta expects a fast 200, retries aggressively otherwise
   res.sendStatus(200);
 
