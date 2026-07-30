@@ -1,5 +1,6 @@
 const conversationsRepo = require('../repositories/conversationsRepository');
 const messagesRepo = require('../repositories/messagesRepository');
+const whatsappClient = require('../services/whatsappClient');
 
 // GET — Meta's one-time verification handshake when you register the webhook URL
 function verifyWebhook(req, res) {
