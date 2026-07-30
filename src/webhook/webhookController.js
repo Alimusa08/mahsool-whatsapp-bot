@@ -42,9 +42,23 @@ async function receiveEvent(req, res) {
         senderType: 'user',
         content,
       });
+      
 
       const status = await conversationsRepo.getStatus(phonenumber);
       console.log(`Conversation status for ${phonenumber}: ${status}`);
+
+      if (status === 'bot') {
+        const replytext = `You said: "${content}"`;
+        await whatsappClient.sendTextMessage(phonenumber, replytext);
+
+        await messagesRepo.logMessage({
+          phonenumber,
+          userId: null, // resolved later once we wire in mahsoolApiClient
+          direction: 'outbound',
+            senderType: 'bot',
+            content: replytext,
+        });
+    }
 
       // Bot reply logic + actual WhatsApp send-back come in the next step
     }
