@@ -56,6 +56,7 @@ async function receiveEvent(req, res) {
       try {
         const auth = await mahsoolApiClient.getAccessToken(`+${phonenumber}`);
         userId = auth.userId;
+        accessToken = auth.accessToken;
       } catch (err) {
         const isUnregistered = err.response?.status === 401;
         const replyText = isUnregistered ? NO_ACCOUNT_MESSAGE : GENERIC_ERROR_MESSAGE;
@@ -77,7 +78,7 @@ async function receiveEvent(req, res) {
 
       let replyText;
       try {
-        replyText = await advisorClient.askAdvisor(content);
+        replyText = await advisorClient.askAdvisor(content, accessToken);
       } catch (err) {
         console.error('Advisor request failed:', err.message);
         replyText = GENERIC_ERROR_MESSAGE;
