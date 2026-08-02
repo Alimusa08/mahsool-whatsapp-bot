@@ -61,8 +61,8 @@ async function receiveEvent(req, res) {
         const replyText = isUnregistered ? NO_ACCOUNT_MESSAGE : GENERIC_ERROR_MESSAGE;
 
         if (!isUnregistered) {
-          console.error('Auth check failed:', err.message);
-        }
+  console.error('Auth check failed:', err.response?.status, err.response?.data || err.message);
+}
 
         await whatsappClient.sendTextMessage(phonenumber, replyText);
         await messagesRepo.logMessage({
