@@ -1,7 +1,7 @@
 const axios = require('axios');
 
 const client = axios.create({
-  baseURL: process.env.MAHSOOL_API_BASE_URL,
+  baseURL: process.env.ANOTHER_API_BASE_URL,
 });
 
 async function askAdvisor(question, accessToken) {

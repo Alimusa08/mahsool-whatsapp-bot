@@ -2,6 +2,10 @@ const conversationsRepo = require('../repositories/conversationsRepository');
 const messagesRepo = require('../repositories/messagesRepository');
 const whatsappClient = require('../services/whatsappClient');
 const advisorClient = require('../services/advisorClient');
+const mahsoolApiClient = require('../services/mahsoolApiClient');
+
+const NO_ACCOUNT_MESSAGE = 'عذرا ليس لديك حساب مسجل على منصة تيراب محصول';
+const GENERIC_ERROR_MESSAGE = 'عذراً، حدث خطأ، الرجاء المحاولة مرة أخرى.';
 
 // GET — Meta's one-time verification handshake when you register the webhook URL
 function verifyWebhook(req, res) {
@@ -45,14 +49,13 @@ async function receiveEvent(req, res) {
 
       const status = await conversationsRepo.getStatus(phonenumber);
       if (status !== 'bot') {
-        continue;
+        continue; // human is handling this conversation
       }
 
-      let userId, accessToken;
+      let userId;
       try {
         const auth = await mahsoolApiClient.getAccessToken(phonenumber);
         userId = auth.userId;
-        accessToken = auth.accessToken;
       } catch (err) {
         const isUnregistered = err.response?.status === 401;
         const replyText = isUnregistered ? NO_ACCOUNT_MESSAGE : GENERIC_ERROR_MESSAGE;
@@ -69,12 +72,12 @@ async function receiveEvent(req, res) {
           senderType: 'bot',
           content: replyText,
         });
-        continue;
+        continue; // don't call the advisor for this message
       }
 
       let replyText;
       try {
-        replyText = await advisorClient.askAdvisor(content, accessToken);
+        replyText = await advisorClient.askAdvisor(content);
       } catch (err) {
         console.error('Advisor request failed:', err.message);
         replyText = GENERIC_ERROR_MESSAGE;
