@@ -1,6 +1,7 @@
 const conversationsRepo = require('../repositories/conversationsRepository');
 const messagesRepo = require('../repositories/messagesRepository');
 const whatsappClient = require('../services/whatsappClient');
+const advisorClient = require('../services/advisorClient');
 
 // GET — Meta's one-time verification handshake when you register the webhook URL
 function verifyWebhook(req, res) {
@@ -16,9 +17,8 @@ function verifyWebhook(req, res) {
 }
 
 // POST — actual incoming message/status events
+
 async function receiveEvent(req, res) {
-  console.log(`Webhook hit at ${new Date().toISOString()}`);
-  // Respond immediately — Meta expects a fast 200, retries aggressively otherwise
   res.sendStatus(200);
 
   try {
@@ -27,7 +27,7 @@ async function receiveEvent(req, res) {
     const messages = change?.value?.messages;
 
     if (!messages || messages.length === 0) {
-      return; // status updates (delivered/read) also land here — nothing to do yet
+      return;
     }
 
     for (const message of messages) {
@@ -38,30 +38,33 @@ async function receiveEvent(req, res) {
 
       await messagesRepo.logMessage({
         phonenumber,
-        userId: null, // resolved later once we wire in mahsoolApiClient
+        userId: null,
         direction: 'inbound',
         senderType: 'user',
         content,
       });
-      
 
       const status = await conversationsRepo.getStatus(phonenumber);
-      console.log(`Conversation status for ${phonenumber}: ${status}`);
 
       if (status === 'bot') {
-        const replytext = `You said: "${content}"`;
-        await whatsappClient.sendTextMessage(phonenumber, replytext);
+        let replyText;
+        try {
+          replyText = await advisorClient.askAdvisor(content);
+        } catch (err) {
+          console.error('Advisor request failed:', err.message);
+          replyText = 'عذراً، حدث خطأ، الرجاء المحاولة مرة أخرى.';
+        }
+
+        await whatsappClient.sendTextMessage(phonenumber, replyText);
 
         await messagesRepo.logMessage({
           phonenumber,
-          userId: null, // resolved later once we wire in mahsoolApiClient
+          userId: null,
           direction: 'outbound',
-            senderType: 'bot',
-            content: replytext,
+          senderType: 'bot',
+          content: replyText,
         });
-    }
-
-      // Bot reply logic + actual WhatsApp send-back come in the next step
+      }
     }
   } catch (err) {
     console.error('Error handling webhook event:', err);
