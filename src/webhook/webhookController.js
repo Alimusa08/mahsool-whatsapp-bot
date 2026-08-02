@@ -17,7 +17,6 @@ function verifyWebhook(req, res) {
 }
 
 // POST — actual incoming message/status events
-
 async function receiveEvent(req, res) {
   res.sendStatus(200);
 
@@ -45,18 +44,24 @@ async function receiveEvent(req, res) {
       });
 
       const status = await conversationsRepo.getStatus(phonenumber);
+      if (status !== 'bot') {
+        continue;
+      }
 
-      if (status === 'bot') {
-        let replyText;
-        try {
-          replyText = await advisorClient.askAdvisor(content);
-        } catch (err) {
-          console.error('Advisor request failed:', err.message);
-          replyText = 'عذراً، حدث خطأ، الرجاء المحاولة مرة أخرى.';
+      let userId, accessToken;
+      try {
+        const auth = await mahsoolApiClient.getAccessToken(phonenumber);
+        userId = auth.userId;
+        accessToken = auth.accessToken;
+      } catch (err) {
+        const isUnregistered = err.response?.status === 401;
+        const replyText = isUnregistered ? NO_ACCOUNT_MESSAGE : GENERIC_ERROR_MESSAGE;
+
+        if (!isUnregistered) {
+          console.error('Auth check failed:', err.message);
         }
 
         await whatsappClient.sendTextMessage(phonenumber, replyText);
-
         await messagesRepo.logMessage({
           phonenumber,
           userId: null,
@@ -64,7 +69,25 @@ async function receiveEvent(req, res) {
           senderType: 'bot',
           content: replyText,
         });
+        continue;
       }
+
+      let replyText;
+      try {
+        replyText = await advisorClient.askAdvisor(content, accessToken);
+      } catch (err) {
+        console.error('Advisor request failed:', err.message);
+        replyText = GENERIC_ERROR_MESSAGE;
+      }
+
+      await whatsappClient.sendTextMessage(phonenumber, replyText);
+      await messagesRepo.logMessage({
+        phonenumber,
+        userId,
+        direction: 'outbound',
+        senderType: 'bot',
+        content: replyText,
+      });
     }
   } catch (err) {
     console.error('Error handling webhook event:', err);
