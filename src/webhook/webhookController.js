@@ -54,7 +54,7 @@ async function receiveEvent(req, res) {
 
       let userId;
       try {
-        const auth = await mahsoolApiClient.getAccessToken(phonenumber);
+        const auth = await mahsoolApiClient.getAccessToken(`+${phonenumber}`);
         userId = auth.userId;
       } catch (err) {
         const isUnregistered = err.response?.status === 401;
