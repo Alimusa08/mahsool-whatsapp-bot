@@ -130,7 +130,7 @@ function parseDob(rawInput) {
 // when there's another page, so real options per page = 9.
 const LIST_PAGE_SIZE = 9;
 const ROW_TITLE_MAX = 24; // WhatsApp row title limit
-const MORE_ROW_TITLE = 'المزيد ⏵';
+const MORE_ROW_TITLE = 'المزيد';
 
 function truncate(str, max) {
   const s = String(str);
