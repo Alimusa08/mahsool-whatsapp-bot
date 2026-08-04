@@ -115,6 +115,13 @@ async function handleRegistrationMessage(phonenumber, input) {
   await deliverMessage(phonenumber, null, result.message);
 }
 
+// data.dob is collected as plain YYYY-MM-DD (easier to type over WhatsApp);
+// the API requires full RFC3339 (YYYY-MM-DDTHH:mm:ssZ). Midnight UTC is an
+// arbitrary but harmless choice since only the date itself is meaningful.
+function toRfc3339Date(yyyyMmDd) {
+  return `${yyyyMmDd}T00:00:00Z`;
+}
+
 // Calls /auth/register with the collected answers, then reuses the existing
 // token flow to fetch and cache an access token for the new account.
 async function completeRegistration(phonenumber, data) {
@@ -126,7 +133,7 @@ async function completeRegistration(phonenumber, data) {
     password,
     location: data.location,
     type: data.type,
-    dob: data.dob,
+    dob: toRfc3339Date(data.dob),
     gender: data.gender,
   };
 

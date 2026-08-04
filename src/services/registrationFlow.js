@@ -28,7 +28,23 @@ const SERVICE_OPTIONS = [
   { id: 3, name: 'عمالة' },
 ];
 
-const DOB_REGEX = /^\d{4}-\d{2}-\d{2}$/; // ASSUMPTION: API expects YYYY-MM-DD; confirm against schema/docs.
+const DOB_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+// User types plain YYYY-MM-DD (easier over WhatsApp); the API actually wants
+// full RFC3339 (YYYY-MM-DDTHH:mm:ssZ), which we build in webhookController
+// right before calling /auth/register — see toRfc3339Date().
+// This also rejects calendar-invalid dates like 2023-02-30, which the regex
+// alone would let through.
+function isValidDob(str) {
+  if (!DOB_REGEX.test(str)) return false;
+  const [year, month, day] = str.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
 
 // WhatsApp list messages cap at 10 rows total. Reserve one row for "more"
 // when there's another page, so real options per page = 9.
@@ -161,7 +177,7 @@ async function advanceFlow(session, input) {
     }
 
     case 'dob': {
-      if (input.type !== 'text' || !DOB_REGEX.test(input.text.trim())) {
+      if (input.type !== 'text' || !isValidDob(input.text.trim())) {
         return { retry: true, message: dobMessage() };
       }
       const states = await mahsoolApiClient.getStates();
