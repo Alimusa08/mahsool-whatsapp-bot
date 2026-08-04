@@ -116,10 +116,12 @@ async function handleRegistrationMessage(phonenumber, input) {
 }
 
 // data.dob is collected as plain YYYY-MM-DD (easier to type over WhatsApp);
-// the API requires full RFC3339 (YYYY-MM-DDTHH:mm:ssZ). Midnight UTC is an
-// arbitrary but harmless choice since only the date itself is meaningful.
-function toRfc3339Date(yyyyMmDd) {
-  return `${yyyyMmDd}T00:00:00Z`;
+// the API expects full ISO-8601 with milliseconds, e.g.
+// "2004-04-20T00:00:00.000Z" — confirmed against the real payload the
+// website itself sends. Midnight UTC is an arbitrary but harmless choice
+// since only the calendar date itself is meaningful.
+function toRegisterDob(yyyyMmDd) {
+  return new Date(`${yyyyMmDd}T00:00:00Z`).toISOString();
 }
 
 // Calls /auth/register with the collected answers, then reuses the existing
@@ -131,17 +133,15 @@ async function completeRegistration(phonenumber, data) {
     name: data.name,
     phonenumber: `+${phonenumber}`, // ASSUMPTION: matches the `+${phonenumber}` convention already used for /auth/whatsapp/token. Confirm this yields the 13-char format the register schema expects.
     password,
+    repassword: password, // required by the API — confirmed from the real browser payload
     location: data.location,
+    city: data.city,
     type: data.type,
-    dob: toRfc3339Date(data.dob),
+    dob: toRegisterDob(data.dob),
     gender: data.gender,
+    subCategory_id: data.subCategory_id, // always present; [] when type is supplier
+    service_id: data.service_id, // always present; [] when type isn't supplier
   };
-
-  if (data.type === 'supplier') {
-    payload.service_id = data.service_id;
-  } else {
-    payload.subCategory_id = data.subCategory_id;
-  }
 
   try {
     await mahsoolApiClient.register(payload);

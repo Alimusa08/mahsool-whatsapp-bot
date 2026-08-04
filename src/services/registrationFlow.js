@@ -1,13 +1,17 @@
 const mahsoolApiClient = require('./mahsoolApiClient');
 
-// Steps run in order: type -> name -> gender -> dob -> location -> category -> done
+// Steps run in order: type -> name -> gender -> dob -> location -> city -> category -> done
 // type/gender use reply buttons (<=3 options, fits WhatsApp's button limit).
-// location/category use list messages with real API ids embedded directly in
-// the row id as "<prefix>:<id>", so a reply never needs to be re-mapped
-// against a stored position — we just read the id back out.
+// location/city/category use list messages with real API ids embedded
+// directly in the row id as "<prefix>:<id>", so a reply never needs to be
+// re-mapped against a stored position — we just read the id back out.
+// city is fetched from /cities/<stateId> once location is picked, matching
+// how the website's own registration flow works.
 // category is single-select for now (WhatsApp lists have no native
 // multi-select), so subCategory_id/service_id always end up as one-element
-// arrays here.
+// (or empty) arrays here. The register endpoint expects BOTH keys present
+// on every request — the one that doesn't apply to the chosen type is sent
+// as [] rather than omitted, matching what the website actually sends.
 // name/dob stay free text — WhatsApp has no interactive widget for open text.
 
 const TYPE_OPTIONS = [
@@ -143,6 +147,10 @@ function locationMessage(options, page) {
   return buildListMessage('loc', 'الرجاء اختيار المنطقة:', 'اختر المنطقة', 'المناطق', options, page);
 }
 
+function cityMessage(options, page) {
+  return buildListMessage('city', 'الرجاء اختيار المدينة:', 'اختر المدينة', 'المدن', options, page);
+}
+
 function categoryMessage(options, page, isSupplier) {
   const bodyText = isSupplier ? 'الرجاء اختيار الخدمة:' : 'الرجاء اختيار الفئة:';
   const sectionTitle = isSupplier ? 'الخدمات' : 'الفئات';
@@ -201,12 +209,34 @@ async function advanceFlow(session, input) {
       if (!matched) return { retry: true, message: locationMessage(options, 0) };
 
       const { _locationOptions, ...rest } = data;
+      const cities = await mahsoolApiClient.getCities(matched.id);
+
+      return {
+        step: 'city',
+        data: { ...rest, location: matched.id, _cityOptions: cities },
+        message: cityMessage(cities, 0),
+      };
+    }
+
+    case 'city': {
+      const options = data._cityOptions || [];
+      const parsed = parseListReply(input, 'city');
+      if (!parsed) return { retry: true, message: cityMessage(options, 0) };
+
+      if (parsed.more !== undefined) {
+        return { step: 'city', data, message: cityMessage(options, parsed.more) };
+      }
+
+      const matched = options.find((o) => Number(o.id) === parsed.value);
+      if (!matched) return { retry: true, message: cityMessage(options, 0) };
+
+      const { _cityOptions, ...rest } = data;
       const isSupplier = rest.type === 'supplier';
       const categoryOptions = isSupplier ? SERVICE_OPTIONS : await mahsoolApiClient.getSubCategories();
 
       return {
         step: 'category',
-        data: { ...rest, location: matched.id, _categoryOptions: categoryOptions },
+        data: { ...rest, city: matched.id, _categoryOptions: categoryOptions },
         message: categoryMessage(categoryOptions, 0, isSupplier),
       };
     }
@@ -226,10 +256,15 @@ async function advanceFlow(session, input) {
 
       const { _categoryOptions, ...rest } = data;
       const finalData = { ...rest };
+
+      // Register endpoint expects both keys on every request; the one that
+      // doesn't apply to this type is sent as [] rather than omitted.
       if (isSupplier) {
         finalData.service_id = [matched.id];
+        finalData.subCategory_id = [];
       } else {
         finalData.subCategory_id = [matched.id];
+        finalData.service_id = [];
       }
 
       return { complete: true, data: finalData };

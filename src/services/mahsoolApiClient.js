@@ -16,6 +16,9 @@ let statesCacheExpiresAt = 0;
 let subCategoriesCache = null;
 let subCategoriesCacheExpiresAt = 0;
 
+// Cities are per-state, so cache by state id rather than a single value.
+const citiesCacheByState = new Map(); // stateId -> { data, expiresAt }
+
 async function fetchFreshToken(phonenumber) {
   const response = await client.post(
     '/auth/whatsapp/token',
@@ -71,6 +74,23 @@ async function getSubCategories() {
   return subCategoriesCache;
 }
 
+// ASSUMPTION: response shape is an array of { id, name }, matching /state
+// and /categories/subCategories. Confirmed this endpoint exists and is
+// called as /cities/<stateId> from the website's own registration flow.
+async function getCities(stateId) {
+  const cached = citiesCacheByState.get(stateId);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.data;
+  }
+
+  const response = await client.get(`/cities/${stateId}`);
+  citiesCacheByState.set(stateId, {
+    data: response.data,
+    expiresAt: Date.now() + REFERENCE_CACHE_TTL_MS,
+  });
+  return response.data;
+}
+
 // ASSUMPTION: /auth/register is authenticated the same way as
 // /auth/whatsapp/token (x-service-secret header). Confirm against the real
 // route — if it's public or uses a different scheme, drop/adjust the header.
@@ -80,4 +100,4 @@ async function register(payload) {
   return response.data;
 }
 
-module.exports = { getAccessToken, getStates, getSubCategories, register };
+module.exports = { getAccessToken, getStates, getCities, getSubCategories, register };
