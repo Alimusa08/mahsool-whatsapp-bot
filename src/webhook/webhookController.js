@@ -22,28 +22,86 @@ function verifyWebhook(req, res) {
   return res.sendStatus(403);
 }
 
-async function sendAndLog(phonenumber, userId, text) {
-  await whatsappClient.sendTextMessage(phonenumber, text);
+// Turns a raw incoming WhatsApp message into:
+//   input      — what registrationFlow/advisor actually consume
+//   logContent — a plain-text summary for whatsapp_messages.content
+function normalizeIncoming(message) {
+  if (message.type === 'text') {
+    const text = message.text?.body || '';
+    return { input: { type: 'text', text }, logContent: text };
+  }
+
+  if (message.type === 'interactive') {
+    const interactive = message.interactive || {};
+
+    if (interactive.type === 'list_reply') {
+      const { id, title } = interactive.list_reply;
+      return { input: { type: 'interactive', id }, logContent: title || id };
+    }
+
+    if (interactive.type === 'button_reply') {
+      const { id, title } = interactive.button_reply;
+      return { input: { type: 'interactive', id }, logContent: title || id };
+    }
+  }
+
+  return { input: { type: 'unsupported' }, logContent: '[unsupported message type]' };
+}
+
+// Sends an outgoing message (text / list / buttons) and logs a plain-text
+// summary of it, since whatsapp_messages.content is a single text column.
+async function deliverMessage(phonenumber, userId, message) {
+  let logContent;
+
+  switch (message.kind) {
+    case 'text':
+      await whatsappClient.sendTextMessage(phonenumber, message.text);
+      logContent = message.text;
+      break;
+
+    case 'buttons':
+      await whatsappClient.sendButtonMessage(phonenumber, {
+        bodyText: message.bodyText,
+        buttons: message.buttons,
+      });
+      logContent = `${message.bodyText} [${message.buttons.map((b) => b.title).join(' | ')}]`;
+      break;
+
+    case 'list':
+      await whatsappClient.sendListMessage(phonenumber, {
+        bodyText: message.bodyText,
+        buttonLabel: message.buttonLabel,
+        sections: message.sections,
+      });
+      logContent = `${message.bodyText} [${message.sections
+        .flatMap((s) => s.rows.map((r) => r.title))
+        .join(' | ')}]`;
+      break;
+
+    default:
+      throw new Error(`Unknown message kind: ${message.kind}`);
+  }
+
   await messagesRepo.logMessage({
     phonenumber,
     userId: userId || null,
     direction: 'outbound',
     senderType: 'bot',
-    content: text,
+    content: logContent,
   });
 }
 
 // Drives one turn of the registration conversation for an unregistered
 // phone number. Persists session state in whatsapp_registrations between
 // webhook calls since each call is a stateless HTTP request.
-async function handleRegistrationMessage(phonenumber, content) {
+async function handleRegistrationMessage(phonenumber, input) {
   const session = await registrationsRepo.getSession(phonenumber);
   const result = session
-    ? await registrationFlow.advanceFlow(session, content)
+    ? await registrationFlow.advanceFlow(session, input)
     : await registrationFlow.startFlow();
 
   if (result.retry) {
-    await sendAndLog(phonenumber, null, result.replyText);
+    await deliverMessage(phonenumber, null, result.message);
     return;
   }
 
@@ -54,7 +112,7 @@ async function handleRegistrationMessage(phonenumber, content) {
   }
 
   await registrationsRepo.saveSession(phonenumber, result.step, result.data);
-  await sendAndLog(phonenumber, null, result.replyText);
+  await deliverMessage(phonenumber, null, result.message);
 }
 
 // Calls /auth/register with the collected answers, then reuses the existing
@@ -64,7 +122,7 @@ async function completeRegistration(phonenumber, data) {
 
   const payload = {
     name: data.name,
-    phonenumber: `+${phonenumber}`, 
+    phonenumber: `+${phonenumber}`, // ASSUMPTION: matches the `+${phonenumber}` convention already used for /auth/whatsapp/token. Confirm this yields the 13-char format the register schema expects.
     password,
     location: data.location,
     type: data.type,
@@ -82,11 +140,10 @@ async function completeRegistration(phonenumber, data) {
     await mahsoolApiClient.register(payload);
   } catch (err) {
     console.error('Registration failed:', err.response?.status, err.response?.data || err.message);
-    await sendAndLog(
-      phonenumber,
-      null,
-      'عذراً، لم نتمكن من إنشاء حسابك. الرجاء المحاولة مرة أخرى بإرسال أي رسالة.'
-    );
+    await deliverMessage(phonenumber, null, {
+      kind: 'text',
+      text: 'عذراً، لم نتمكن من إنشاء حسابك. الرجاء المحاولة مرة أخرى بإرسال أي رسالة.',
+    });
     return;
   }
 
@@ -97,7 +154,7 @@ async function completeRegistration(phonenumber, data) {
     `كلمة المرور المؤقتة الخاصة بك: ${password}\n` +
     'الرجاء الاحتفاظ بها وتغييرها لاحقاً من داخل التطبيق. يمكنك الآن إرسال طلبك.';
 
-  await sendAndLog(phonenumber, auth.userId, successText);
+  await deliverMessage(phonenumber, auth.userId, { kind: 'text', text: successText });
 }
 
 // POST — actual incoming message/status events
@@ -115,16 +172,16 @@ async function receiveEvent(req, res) {
 
     for (const message of messages) {
       const phonenumber = message.from;
-      const content = message.text?.body || '[unsupported message type]';
+      const { input, logContent } = normalizeIncoming(message);
 
-      console.log(`Incoming from ${phonenumber}: ${content}`);
+      console.log(`Incoming from ${phonenumber}: ${logContent}`);
 
       await messagesRepo.logMessage({
         phonenumber,
         userId: null,
         direction: 'inbound',
         senderType: 'user',
-        content,
+        content: logContent,
       });
 
       const status = await conversationsRepo.getStatus(phonenumber);
@@ -143,28 +200,33 @@ async function receiveEvent(req, res) {
 
         if (!isUnregistered) {
           console.error('Auth check failed:', err.response?.status, err.response?.data || err.message);
-          await sendAndLog(phonenumber, null, GENERIC_ERROR_MESSAGE);
+          await deliverMessage(phonenumber, null, { kind: 'text', text: GENERIC_ERROR_MESSAGE });
           continue;
         }
 
         try {
-          await handleRegistrationMessage(phonenumber, content);
+          await handleRegistrationMessage(phonenumber, input);
         } catch (regErr) {
           console.error('Registration flow failed:', regErr.response?.data || regErr.message);
-          await sendAndLog(phonenumber, null, GENERIC_ERROR_MESSAGE);
+          await deliverMessage(phonenumber, null, { kind: 'text', text: GENERIC_ERROR_MESSAGE });
         }
         continue; // don't call the advisor for this message
       }
 
+      // Advisor only understands free text; interactive taps shouldn't reach
+      // it in practice once registered, but fall back to the button/row
+      // title if one somehow does.
+      const textForAdvisor = input.type === 'text' ? input.text : logContent;
+
       let replyText;
       try {
-        replyText = await advisorClient.askAdvisor(content, accessToken);
+        replyText = await advisorClient.askAdvisor(textForAdvisor, accessToken);
       } catch (err) {
         console.error('Advisor request failed:', err.message);
         replyText = GENERIC_ERROR_MESSAGE;
       }
 
-      await sendAndLog(phonenumber, userId, replyText);
+      await deliverMessage(phonenumber, userId, { kind: 'text', text: replyText });
     }
   } catch (err) {
     console.error('Error handling webhook event:', err);

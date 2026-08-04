@@ -1,19 +1,24 @@
 const mahsoolApiClient = require('./mahsoolApiClient');
 
-// Steps run in this order: type -> name -> gender -> dob -> location -> category -> done
-// "category" collects subCategory_id for buyer/farmer, or service_id for supplier.
-// city and cooperative-only fields are intentionally not collected — city is
-// optional and not part of this flow, cooperative isn't a supported type here.
+// Steps run in order: type -> name -> gender -> dob -> location -> category -> done
+// type/gender use reply buttons (<=3 options, fits WhatsApp's button limit).
+// location/category use list messages with real API ids embedded directly in
+// the row id as "<prefix>:<id>", so a reply never needs to be re-mapped
+// against a stored position — we just read the id back out.
+// category is single-select for now (WhatsApp lists have no native
+// multi-select), so subCategory_id/service_id always end up as one-element
+// arrays here.
+// name/dob stay free text — WhatsApp has no interactive widget for open text.
 
 const TYPE_OPTIONS = [
-  { value: 'supplier', label: 'مورد' },
-  { value: 'buyer', label: 'مشتري' },
-  { value: 'farmer', label: 'مزارع' },
+  { id: 'supplier', title: 'مورد' },
+  { id: 'buyer', title: 'مشتري' },
+  { id: 'farmer', title: 'مزارع' },
 ];
 
 const GENDER_OPTIONS = [
-  { value: 'male', label: 'ذكر' },
-  { value: 'female', label: 'أنثى' },
+  { id: 'male', title: 'ذكر' },
+  { id: 'female', title: 'أنثى' },
 ];
 
 // Hardcoded to match the mobile app — there is no endpoint for this list.
@@ -25,168 +30,190 @@ const SERVICE_OPTIONS = [
 
 const DOB_REGEX = /^\d{4}-\d{2}-\d{2}$/; // ASSUMPTION: API expects YYYY-MM-DD; confirm against schema/docs.
 
-function renderMenu(options, labelKey) {
-  return options.map((opt, i) => `${i + 1}. ${opt[labelKey]}`).join('\n');
+// WhatsApp list messages cap at 10 rows total. Reserve one row for "more"
+// when there's another page, so real options per page = 9.
+const LIST_PAGE_SIZE = 9;
+const ROW_TITLE_MAX = 24; // WhatsApp row title limit
+const MORE_ROW_TITLE = 'المزيد ⏵';
+
+function truncate(str, max) {
+  const s = String(str);
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
-function parseSingleChoice(input, count) {
-  const n = parseInt(String(input).trim(), 10);
-  if (Number.isNaN(n) || n < 1 || n > count) return null;
-  return n;
+// Splits "prefix:rest" on the first colon only (rest may itself contain ':', e.g. "more:2").
+function splitId(id) {
+  const raw = String(id);
+  const idx = raw.indexOf(':');
+  if (idx === -1) return [raw, ''];
+  return [raw.slice(0, idx), raw.slice(idx + 1)];
 }
 
-// Accepts comma/space-separated numbers, e.g. "1,3" or "1 3"; dedupes.
-function parseMultiChoice(input, count) {
-  const parts = String(input).split(/[,،\s]+/).filter(Boolean);
-  if (parts.length === 0) return null;
+function buildListMessage(prefix, bodyText, buttonLabel, sectionTitle, options, page) {
+  const start = page * LIST_PAGE_SIZE;
+  const pageItems = options.slice(start, start + LIST_PAGE_SIZE);
+  const hasMore = start + LIST_PAGE_SIZE < options.length;
 
-  const nums = [];
-  for (const part of parts) {
-    const n = parseInt(part, 10);
-    if (Number.isNaN(n) || n < 1 || n > count) return null;
-    nums.push(n);
+  const rows = pageItems.map((opt) => ({
+    id: `${prefix}:${opt.id}`,
+    title: truncate(opt.name, ROW_TITLE_MAX),
+  }));
+
+  if (hasMore) {
+    rows.push({ id: `${prefix}:more:${page + 1}`, title: MORE_ROW_TITLE });
   }
-  return [...new Set(nums)];
-}
 
-function typePrompt() {
-  return (
-    'مرحباً! يبدو أنه ليس لديك حساب مسجل بعد على منصة محصول.\n' +
-    'دعنا ننشئ حساباً جديداً. الرجاء اختيار نوع الحساب:\n' +
-    renderMenu(TYPE_OPTIONS, 'label')
-  );
-}
-
-function namePrompt() {
-  return 'الرجاء إدخال الاسم الكامل:';
-}
-
-function genderPrompt() {
-  return `الرجاء اختيار الجنس:\n${renderMenu(GENDER_OPTIONS, 'label')}`;
-}
-
-function dobPrompt() {
-  return 'الرجاء إدخال تاريخ الميلاد بصيغة (سنة-شهر-يوم)، مثال: 1990-05-20';
-}
-
-function locationPrompt(stateOptions) {
-  return `الرجاء اختيار المنطقة:\n${renderMenu(stateOptions, 'name')}`;
-}
-
-function categoryPrompt(categoryOptions) {
-  return (
-    'الرجاء اختيار الفئة المناسبة (يمكنك اختيار أكثر من رقم مفصولة بفاصلة، مثال: 1,3):\n' +
-    renderMenu(categoryOptions, 'name')
-  );
-}
-
-// Starts a fresh registration session for a phone number.
-async function startFlow() {
   return {
-    step: 'type',
-    data: {},
-    replyText: typePrompt(),
+    kind: 'list',
+    bodyText,
+    buttonLabel,
+    sections: [{ title: sectionTitle, rows }],
   };
 }
 
-// Advances an existing session given the user's latest message.
-// Returns one of:
-//   { retry: true, replyText }                      — invalid input, same step repeated
-//   { step, data, replyText }                        — advanced to the next step
-//   { complete: true, data }                         — all fields collected, ready to register
-async function advanceFlow(session, userInput) {
+// Parses a reply against an expected id prefix for fixed button sets (type/gender).
+// Returns the matched option's id, or null if the reply doesn't match.
+function matchButton(input, prefix, options) {
+  if (input.type !== 'interactive') return null;
+  const [p, value] = splitId(input.id);
+  if (p !== prefix) return null;
+  const match = options.find((o) => o.id === value);
+  return match ? match.id : null;
+}
+
+// Parses a reply against a paginated list step (location/category).
+// Returns { more: pageNumber } for a "more" tap, { value } for a real
+// selection, or null if the reply doesn't match this prefix at all.
+function parseListReply(input, prefix) {
+  if (input.type !== 'interactive') return null;
+  const [p, rest] = splitId(input.id);
+  if (p !== prefix) return null;
+
+  if (rest.startsWith('more:')) {
+    const page = parseInt(rest.slice('more:'.length), 10);
+    return Number.isNaN(page) ? null : { more: page };
+  }
+
+  const value = Number(rest);
+  return Number.isNaN(value) ? null : { value };
+}
+
+function typeMessage() {
+  return {
+    kind: 'buttons',
+    bodyText:
+      'مرحباً! يبدو أنه ليس لديك حساب مسجل بعد على منصة محصول.\nدعنا ننشئ حساباً جديداً. الرجاء اختيار نوع الحساب:',
+    buttons: TYPE_OPTIONS.map((o) => ({ id: `type:${o.id}`, title: o.title })),
+  };
+}
+
+function nameMessage() {
+  return { kind: 'text', text: 'الرجاء إدخال الاسم الكامل:' };
+}
+
+function genderMessage() {
+  return {
+    kind: 'buttons',
+    bodyText: 'الرجاء اختيار الجنس:',
+    buttons: GENDER_OPTIONS.map((o) => ({ id: `gender:${o.id}`, title: o.title })),
+  };
+}
+
+function dobMessage() {
+  return { kind: 'text', text: 'الرجاء إدخال تاريخ الميلاد بصيغة (سنة-شهر-يوم)، مثال: 1990-05-20' };
+}
+
+function locationMessage(options, page) {
+  return buildListMessage('loc', 'الرجاء اختيار المنطقة:', 'اختر المنطقة', 'المناطق', options, page);
+}
+
+function categoryMessage(options, page, isSupplier) {
+  const bodyText = isSupplier ? 'الرجاء اختيار الخدمة:' : 'الرجاء اختيار الفئة:';
+  const sectionTitle = isSupplier ? 'الخدمات' : 'الفئات';
+  return buildListMessage('cat', bodyText, 'اختر', sectionTitle, options, page);
+}
+
+async function startFlow() {
+  return { step: 'type', data: {}, message: typeMessage() };
+}
+
+async function advanceFlow(session, input) {
   const { step, data } = session;
-  const trimmed = (userInput || '').trim();
 
   switch (step) {
     case 'type': {
-      const choice = parseSingleChoice(trimmed, TYPE_OPTIONS.length);
-      if (!choice) {
-        return { retry: true, replyText: `اختيار غير صالح.\n${typePrompt()}` };
-      }
-      return {
-        step: 'name',
-        data: { ...data, type: TYPE_OPTIONS[choice - 1].value },
-        replyText: namePrompt(),
-      };
+      const value = matchButton(input, 'type', TYPE_OPTIONS);
+      if (!value) return { retry: true, message: typeMessage() };
+      return { step: 'name', data: { ...data, type: value }, message: nameMessage() };
     }
 
     case 'name': {
-      if (trimmed.length < 2) {
-        return { retry: true, replyText: `الاسم قصير جداً.\n${namePrompt()}` };
+      if (input.type !== 'text' || input.text.trim().length < 2) {
+        return { retry: true, message: nameMessage() };
       }
-      return {
-        step: 'gender',
-        data: { ...data, name: trimmed },
-        replyText: genderPrompt(),
-      };
+      return { step: 'gender', data: { ...data, name: input.text.trim() }, message: genderMessage() };
     }
 
     case 'gender': {
-      const choice = parseSingleChoice(trimmed, GENDER_OPTIONS.length);
-      if (!choice) {
-        return { retry: true, replyText: `اختيار غير صالح.\n${genderPrompt()}` };
-      }
-      return {
-        step: 'dob',
-        data: { ...data, gender: GENDER_OPTIONS[choice - 1].value },
-        replyText: dobPrompt(),
-      };
+      const value = matchButton(input, 'gender', GENDER_OPTIONS);
+      if (!value) return { retry: true, message: genderMessage() };
+      return { step: 'dob', data: { ...data, gender: value }, message: dobMessage() };
     }
 
     case 'dob': {
-      if (!DOB_REGEX.test(trimmed)) {
-        return { retry: true, replyText: `صيغة غير صحيحة.\n${dobPrompt()}` };
+      if (input.type !== 'text' || !DOB_REGEX.test(input.text.trim())) {
+        return { retry: true, message: dobMessage() };
       }
       const states = await mahsoolApiClient.getStates();
       return {
         step: 'location',
-        data: { ...data, dob: trimmed, _locationOptions: states },
-        replyText: locationPrompt(states),
+        data: { ...data, dob: input.text.trim(), _locationOptions: states },
+        message: locationMessage(states, 0),
       };
     }
 
     case 'location': {
       const options = data._locationOptions || [];
-      const choice = parseSingleChoice(trimmed, options.length);
-      if (!choice) {
-        return { retry: true, replyText: `اختيار غير صالح.\n${locationPrompt(options)}` };
+      const parsed = parseListReply(input, 'loc');
+      if (!parsed) return { retry: true, message: locationMessage(options, 0) };
+
+      if (parsed.more !== undefined) {
+        return { step: 'location', data, message: locationMessage(options, parsed.more) };
       }
+
+      const matched = options.find((o) => Number(o.id) === parsed.value);
+      if (!matched) return { retry: true, message: locationMessage(options, 0) };
 
       const { _locationOptions, ...rest } = data;
-      const locationId = options[choice - 1].id;
+      const isSupplier = rest.type === 'supplier';
+      const categoryOptions = isSupplier ? SERVICE_OPTIONS : await mahsoolApiClient.getSubCategories();
 
-      if (rest.type === 'supplier') {
-        return {
-          step: 'category',
-          data: { ...rest, location: locationId, _categoryOptions: SERVICE_OPTIONS },
-          replyText: categoryPrompt(SERVICE_OPTIONS),
-        };
-      }
-
-      const subCategories = await mahsoolApiClient.getSubCategories();
       return {
         step: 'category',
-        data: { ...rest, location: locationId, _categoryOptions: subCategories },
-        replyText: categoryPrompt(subCategories),
+        data: { ...rest, location: matched.id, _categoryOptions: categoryOptions },
+        message: categoryMessage(categoryOptions, 0, isSupplier),
       };
     }
 
     case 'category': {
       const options = data._categoryOptions || [];
-      const choices = parseMultiChoice(trimmed, options.length);
-      if (!choices) {
-        return { retry: true, replyText: `اختيار غير صالح.\n${categoryPrompt(options)}` };
+      const isSupplier = data.type === 'supplier';
+      const parsed = parseListReply(input, 'cat');
+      if (!parsed) return { retry: true, message: categoryMessage(options, 0, isSupplier) };
+
+      if (parsed.more !== undefined) {
+        return { step: 'category', data, message: categoryMessage(options, parsed.more, isSupplier) };
       }
 
-      const selectedIds = choices.map((n) => options[n - 1].id);
+      const matched = options.find((o) => Number(o.id) === parsed.value);
+      if (!matched) return { retry: true, message: categoryMessage(options, 0, isSupplier) };
+
       const { _categoryOptions, ...rest } = data;
       const finalData = { ...rest };
-
-      if (rest.type === 'supplier') {
-        finalData.service_id = selectedIds;
+      if (isSupplier) {
+        finalData.service_id = [matched.id];
       } else {
-        finalData.subCategory_id = selectedIds;
+        finalData.subCategory_id = [matched.id];
       }
 
       return { complete: true, data: finalData };

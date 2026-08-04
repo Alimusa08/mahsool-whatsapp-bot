@@ -17,4 +17,45 @@ async function sendTextMessage(to, text) {
   return response.data;
 }
 
-module.exports = { sendTextMessage };
+// sections: [{ title, rows: [{ id, title, description? }] }]
+// WhatsApp hard limit: 10 rows total across all sections.
+async function sendListMessage(to, { bodyText, buttonLabel, sections }) {
+  const response = await client.post('/messages', {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      body: { text: bodyText },
+      action: {
+        button: buttonLabel,
+        sections,
+      },
+    },
+  });
+  return response.data;
+}
+
+// buttons: [{ id, title }] — WhatsApp hard limit: max 3 reply buttons.
+async function sendButtonMessage(to, { bodyText, buttons }) {
+  const response = await client.post('/messages', {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'button',
+      body: { text: bodyText },
+      action: {
+        buttons: buttons.map((b) => ({
+          type: 'reply',
+          reply: { id: b.id, title: b.title },
+        })),
+      },
+    },
+  });
+  return response.data;
+}
+
+module.exports = { sendTextMessage, sendListMessage, sendButtonMessage };
