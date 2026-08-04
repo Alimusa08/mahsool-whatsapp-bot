@@ -14,6 +14,22 @@ const mahsoolApiClient = require('./mahsoolApiClient');
 // as [] rather than omitted, matching what the website actually sends.
 // name/dob stay free text — WhatsApp has no interactive widget for open text.
 
+// Mirrors the .refine() conditions in the real RegisterDto schema:
+// dob/gender are required for everyone EXCEPT Cooperative, Supplier, and
+// ServiceProvider. Of the three types this bot supports, that means only
+// `supplier` skips them — buyer and farmer both still need dob + gender.
+// Kept as a table (not scattered if/else) so a schema change is a one-line
+// edit here instead of a step-logic rework.
+const TYPE_RULES = {
+  supplier: { needsDob: false, needsGender: false },
+  buyer: { needsDob: true, needsGender: true },
+  farmer: { needsDob: true, needsGender: true },
+};
+
+function rulesFor(type) {
+  return TYPE_RULES[type] || { needsDob: true, needsGender: true }; // safe default if an unexpected type slips through
+}
+
 const TYPE_OPTIONS = [
   { id: 'supplier', title: 'مورد' },
   { id: 'buyer', title: 'مشتري' },
@@ -157,6 +173,15 @@ function categoryMessage(options, page, isSupplier) {
   return buildListMessage('cat', bodyText, 'اختر', sectionTitle, options, page);
 }
 
+async function enterLocationStep(data) {
+  const states = await mahsoolApiClient.getStates();
+  return {
+    step: 'location',
+    data: { ...data, _locationOptions: states },
+    message: locationMessage(states, 0),
+  };
+}
+
 async function startFlow() {
   return { step: 'type', data: {}, message: typeMessage() };
 }
@@ -175,25 +200,35 @@ async function advanceFlow(session, input) {
       if (input.type !== 'text' || input.text.trim().length < 2) {
         return { retry: true, message: nameMessage() };
       }
-      return { step: 'gender', data: { ...data, name: input.text.trim() }, message: genderMessage() };
+      const newData = { ...data, name: input.text.trim() };
+      const rules = rulesFor(newData.type);
+
+      if (rules.needsGender) {
+        return { step: 'gender', data: newData, message: genderMessage() };
+      }
+      if (rules.needsDob) {
+        return { step: 'dob', data: newData, message: dobMessage() };
+      }
+      return enterLocationStep(newData);
     }
 
     case 'gender': {
       const value = matchButton(input, 'gender', GENDER_OPTIONS);
       if (!value) return { retry: true, message: genderMessage() };
-      return { step: 'dob', data: { ...data, gender: value }, message: dobMessage() };
+      const newData = { ...data, gender: value };
+      const rules = rulesFor(newData.type);
+
+      if (rules.needsDob) {
+        return { step: 'dob', data: newData, message: dobMessage() };
+      }
+      return enterLocationStep(newData);
     }
 
     case 'dob': {
       if (input.type !== 'text' || !isValidDob(input.text.trim())) {
         return { retry: true, message: dobMessage() };
       }
-      const states = await mahsoolApiClient.getStates();
-      return {
-        step: 'location',
-        data: { ...data, dob: input.text.trim(), _locationOptions: states },
-        message: locationMessage(states, 0),
-      };
+      return enterLocationStep({ ...data, dob: input.text.trim() });
     }
 
     case 'location': {

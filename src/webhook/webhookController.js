@@ -133,12 +133,12 @@ async function completeRegistration(phonenumber, data) {
     name: data.name,
     phonenumber: `+${phonenumber}`, // ASSUMPTION: matches the `+${phonenumber}` convention already used for /auth/whatsapp/token. Confirm this yields the 13-char format the register schema expects.
     password,
-    repassword: password, // required by the API — confirmed from the real browser payload
+    repassword: password, // NOTE: confirmed the real RegisterDto schema has no repassword field/refine — nestjs-zod drops unrecognized keys silently, so this does nothing server-side. Harmless to keep since the website's own request includes it too, but it isn't what fixed the earlier 500.
     location: data.location,
     city: data.city,
     type: data.type,
-    dob: toRegisterDob(data.dob),
-    gender: data.gender,
+    gender: data.gender, // undefined (and dropped by JSON.stringify) for types that don't collect it, e.g. supplier
+    dob: data.dob ? toRegisterDob(data.dob) : undefined,
     subCategory_id: data.subCategory_id, // always present; [] when type is supplier
     service_id: data.service_id, // always present; [] when type isn't supplier
   };
