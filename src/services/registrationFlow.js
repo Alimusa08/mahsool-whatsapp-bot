@@ -7,9 +7,10 @@ const mahsoolApiClient = require('./mahsoolApiClient');
 // re-mapped against a stored position — we just read the id back out.
 // city is fetched from /cities/<stateId> once location is picked, matching
 // how the website's own registration flow works.
-// category is single-select for now (WhatsApp lists have no native
-// multi-select), so subCategory_id/service_id always end up as one-element
-// (or empty) arrays here. The register endpoint expects BOTH keys present
+// category supports multi-select via a loop, since WhatsApp list messages
+// are single-select per message: pick one -> "add another?" (نعم/لا) ->
+// repeat until "لا" or no options remain. subCategory_id/service_id end up
+// as the full set of picks. The register endpoint expects BOTH keys present
 // on every request — the one that doesn't apply to the chosen type is sent
 // as [] rather than omitted, matching what the website actually sends.
 // name/dob stay free text — WhatsApp has no interactive widget for open text.
@@ -49,22 +50,80 @@ const GENDER_OPTIONS = [
   { id: 'female', title: 'أنثى' },
 ];
 
-const DOB_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 // User types plain YYYY-MM-DD (easier over WhatsApp); the API actually wants
 // full RFC3339 (YYYY-MM-DDTHH:mm:ssZ), which we build in webhookController
-// right before calling /auth/register — see toRfc3339Date().
-// This also rejects calendar-invalid dates like 2023-02-30, which the regex
-// alone would let through.
-function isValidDob(str) {
-  if (!DOB_REGEX.test(str)) return false;
-  const [year, month, day] = str.split('-').map(Number);
+// User types a date over WhatsApp, which is prone to formatting mistakes:
+// wrong separator, day/month swapped, Arabic-Indic digits, etc. Rather than
+// rejecting anything that isn't exactly YYYY-MM-DD, parseDob() tries to
+// understand what was meant and normalizes it. Only returns null (triggers
+// a retry) when it genuinely can't tell, or the result isn't a real
+// calendar date.
+const ARABIC_INDIC_DIGITS = '٠١٢٣٤٥٦٧٨٩';
+const PERSIAN_DIGITS = '۰۱۲۳۴۵۶۷۸۹';
+
+function normalizeDigits(str) {
+  return str
+    .replace(/[٠-٩]/g, (d) => String(ARABIC_INDIC_DIGITS.indexOf(d)))
+    .replace(/[۰-۹]/g, (d) => String(PERSIAN_DIGITS.indexOf(d)));
+}
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function isPlausibleBirthYear(year) {
+  const currentYear = new Date().getUTCFullYear();
+  return year >= 1900 && year <= currentYear;
+}
+
+function isValidCalendarDate(year, month, day) {
+  if (!isPlausibleBirthYear(year)) return false;
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
   const date = new Date(Date.UTC(year, month - 1, day));
   return (
     date.getUTCFullYear() === year &&
     date.getUTCMonth() === month - 1 &&
     date.getUTCDate() === day
   );
+}
+
+// Returns "YYYY-MM-DD" or null if the input can't be confidently parsed.
+function parseDob(rawInput) {
+  if (!rawInput) return null;
+  const str = normalizeDigits(rawInput.trim());
+
+  // Contiguous 8 digits: YYYYMMDD (common when someone drops separators)
+  if (/^\d{8}$/.test(str)) {
+    const year = Number(str.slice(0, 4));
+    const month = Number(str.slice(4, 6));
+    const day = Number(str.slice(6, 8));
+    return isValidCalendarDate(year, month, day) ? `${year}-${pad2(month)}-${pad2(day)}` : null;
+  }
+
+  // Split on -, /, ., or whitespace into exactly 3 numeric parts
+  const parts = str.split(/[-/.\s]+/).filter(Boolean);
+  if (parts.length !== 3 || !parts.every((p) => /^\d{1,4}$/.test(p))) {
+    return null;
+  }
+
+  const nums = parts.map(Number);
+  let year;
+  let month;
+  let day;
+
+  if (parts[0].length === 4) {
+    // YYYY-MM-DD — matches the format we actually prompt for
+    [year, month, day] = nums;
+  } else if (parts[2].length === 4) {
+    // DD-MM-YYYY — the common non-ISO format for Arabic/Sudanese users
+    [day, month, year] = nums;
+  } else {
+    return null; // can't tell which part is the year
+  }
+
+  return isValidCalendarDate(year, month, day) ? `${year}-${pad2(month)}-${pad2(day)}` : null;
 }
 
 // WhatsApp list messages cap at 10 rows total. Reserve one row for "more"
@@ -157,7 +216,10 @@ function genderMessage() {
 }
 
 function dobMessage() {
-  return { kind: 'text', text: 'الرجاء إدخال تاريخ الميلاد بصيغة (سنة-شهر-يوم)، مثال: 1990-05-20' };
+  return {
+    kind: 'text',
+    text: 'الرجاء إدخال تاريخ الميلاد، مثال: 1990-05-20 أو 20-05-1990',
+  };
 }
 
 function locationMessage(options, page) {
@@ -174,6 +236,20 @@ function categoryMessage(options, page, isServiceProvider) {
   return buildListMessage('cat', bodyText, 'اختر', sectionTitle, options, page);
 }
 
+// WhatsApp lists are single-select, so multi-select is done as a loop:
+// pick one -> ask "add another?" -> repeat until "لا" or nothing left to pick.
+function categoryConfirmMessage(isServiceProvider) {
+  const label = isServiceProvider ? 'خدمة' : 'فئة';
+  return {
+    kind: 'buttons',
+    bodyText: `هل تريد إضافة ${label} أخرى؟`,
+    buttons: [
+      { id: 'catadd:yes', title: 'نعم' },
+      { id: 'catadd:no', title: 'لا' },
+    ],
+  };
+}
+
 async function enterLocationStep(data) {
   const states = await mahsoolApiClient.getStates();
   return {
@@ -181,6 +257,25 @@ async function enterLocationStep(data) {
     data: { ...data, _locationOptions: states },
     message: locationMessage(states, 0),
   };
+}
+
+// Register endpoint expects both subCategory_id/service_id keys on every
+// request; the one that doesn't apply to this type is sent as [] rather
+// than omitted, matching what the website sends.
+function finalizeCategorySelection(data, isServiceProvider) {
+  const { _categoryOptions, _selectedCategoryIds, ...rest } = data;
+  const finalData = { ...rest };
+  const ids = _selectedCategoryIds || [];
+
+  if (isServiceProvider) {
+    finalData.service_id = ids;
+    finalData.subCategory_id = [];
+  } else {
+    finalData.subCategory_id = ids;
+    finalData.service_id = [];
+  }
+
+  return { complete: true, data: finalData };
 }
 
 async function startFlow() {
@@ -226,10 +321,14 @@ async function advanceFlow(session, input) {
     }
 
     case 'dob': {
-      if (input.type !== 'text' || !isValidDob(input.text.trim())) {
+      if (input.type !== 'text') {
         return { retry: true, message: dobMessage() };
       }
-      return enterLocationStep({ ...data, dob: input.text.trim() });
+      const normalized = parseDob(input.text);
+      if (!normalized) {
+        return { retry: true, message: dobMessage() };
+      }
+      return enterLocationStep({ ...data, dob: normalized });
     }
 
     case 'location': {
@@ -292,20 +391,46 @@ async function advanceFlow(session, input) {
       const matched = options.find((o) => Number(o.id) === parsed.value);
       if (!matched) return { retry: true, message: categoryMessage(options, 0, isServiceProvider) };
 
-      const { _categoryOptions, ...rest } = data;
-      const finalData = { ...rest };
+      const selectedIds = [...(data._selectedCategoryIds || []), matched.id];
+      const remainingOptions = options.filter((o) => o.id !== matched.id);
+      const newData = { ...data, _selectedCategoryIds: selectedIds, _categoryOptions: remainingOptions };
 
-      // Register endpoint expects both keys on every request; the one that
-      // doesn't apply to this type is sent as [] rather than omitted.
-      if (isServiceProvider) {
-        finalData.service_id = [matched.id];
-        finalData.subCategory_id = [];
-      } else {
-        finalData.subCategory_id = [matched.id];
-        finalData.service_id = [];
+      // Nothing left to add — finalize immediately instead of asking a
+      // pointless "add another?" with no options to show.
+      if (remainingOptions.length === 0) {
+        return finalizeCategorySelection(newData, isServiceProvider);
       }
 
-      return { complete: true, data: finalData };
+      return {
+        step: 'category_confirm',
+        data: newData,
+        message: categoryConfirmMessage(isServiceProvider),
+      };
+    }
+
+    case 'category_confirm': {
+      const isServiceProvider = data.type === 'service_provider';
+
+      if (input.type !== 'interactive') {
+        return { retry: true, message: categoryConfirmMessage(isServiceProvider) };
+      }
+
+      const [prefix, value] = splitId(input.id);
+      if (prefix !== 'catadd' || (value !== 'yes' && value !== 'no')) {
+        return { retry: true, message: categoryConfirmMessage(isServiceProvider) };
+      }
+
+      if (value === 'no') {
+        return finalizeCategorySelection(data, isServiceProvider);
+      }
+
+      // "yes" — show the remaining (not yet picked) options again
+      const options = data._categoryOptions || [];
+      return {
+        step: 'category',
+        data,
+        message: categoryMessage(options, 0, isServiceProvider),
+      };
     }
 
     default:
