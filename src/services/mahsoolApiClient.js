@@ -16,6 +16,9 @@ let statesCacheExpiresAt = 0;
 let subCategoriesCache = null;
 let subCategoriesCacheExpiresAt = 0;
 
+let servicesCache = null;
+let servicesCacheExpiresAt = 0;
+
 // Cities are per-state, so cache by state id rather than a single value.
 const citiesCacheByState = new Map(); // stateId -> { data, expiresAt }
 
@@ -48,8 +51,6 @@ async function getAccessToken(phonenumber) {
   return { userId: user_id, accessToken: access_token };
 }
 
-// ASSUMPTION: response shape is an array of { id, name }. Verify against the
-// real /state response and adjust the mapping below if the field names differ.
 async function getStates() {
   if (statesCache && Date.now() < statesCacheExpiresAt) {
     return statesCache;
@@ -61,8 +62,6 @@ async function getStates() {
   return statesCache;
 }
 
-// ASSUMPTION: response shape is an array of { id, name }. Verify against the
-// real /categories/subCategories response.
 async function getSubCategories() {
   if (subCategoriesCache && Date.now() < subCategoriesCacheExpiresAt) {
     return subCategoriesCache;
@@ -74,9 +73,6 @@ async function getSubCategories() {
   return subCategoriesCache;
 }
 
-// ASSUMPTION: response shape is an array of { id, name }, matching /state
-// and /categories/subCategories. Confirmed this endpoint exists and is
-// called as /cities/<stateId> from the website's own registration flow.
 async function getCities(stateId) {
   const cached = citiesCacheByState.get(stateId);
   if (cached && Date.now() < cached.expiresAt) {
@@ -91,13 +87,21 @@ async function getCities(stateId) {
   return response.data;
 }
 
-// ASSUMPTION: /auth/register is authenticated the same way as
-// /auth/whatsapp/token (x-service-secret header). Confirm against the real
-// route — if it's public or uses a different scheme, drop/adjust the header.
+async function getServices() {
+  if (servicesCache && Date.now() < servicesCacheExpiresAt) {
+    return servicesCache;
+  }
+
+  const response = await client.get('/services');
+  servicesCache = response.data;
+  servicesCacheExpiresAt = Date.now() + REFERENCE_CACHE_TTL_MS;
+  return servicesCache;
+}
+
 async function register(payload) {
   const response = await client.post('/auth/register', payload, {
   });
   return response.data;
 }
 
-module.exports = { getAccessToken, getStates, getCities, getSubCategories, register };
+module.exports = { getAccessToken, getStates, getCities, getSubCategories, getServices, register };

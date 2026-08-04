@@ -16,12 +16,20 @@ const mahsoolApiClient = require('./mahsoolApiClient');
 
 // Mirrors the .refine() conditions in the real RegisterDto schema:
 // dob/gender are required for everyone EXCEPT Cooperative, Supplier, and
-// ServiceProvider. Of the three types this bot supports, that means only
-// `supplier` skips them — buyer and farmer both still need dob + gender.
+// ServiceProvider. Of the three types this bot supports, service_provider
+// skips them — buyer and farmer both still need dob + gender.
 // Kept as a table (not scattered if/else) so a schema change is a one-line
 // edit here instead of a step-logic rework.
+//
+// NOTE: originally this table had `supplier` as the third type, based on
+// what the mobile app appeared to support. Confirmed against the live
+// website (teerab.mahsool.sd/signup) that its dropdown has no option that
+// sends type: "supplier" at all — the "شركة" (company) option actually
+// sends type: "service_provider", backed by a real GET /services endpoint.
+// service_provider has identical field requirements to supplier in the
+// schema, so this was a clean swap once discovered.
 const TYPE_RULES = {
-  supplier: { needsDob: false, needsGender: false },
+  service_provider: { needsDob: false, needsGender: false },
   buyer: { needsDob: true, needsGender: true },
   farmer: { needsDob: true, needsGender: true },
 };
@@ -31,7 +39,7 @@ function rulesFor(type) {
 }
 
 const TYPE_OPTIONS = [
-  { id: 'supplier', title: 'مورد' },
+  { id: 'service_provider', title: 'شركة' },
   { id: 'buyer', title: 'مشتري' },
   { id: 'farmer', title: 'مزارع' },
 ];
@@ -39,13 +47,6 @@ const TYPE_OPTIONS = [
 const GENDER_OPTIONS = [
   { id: 'male', title: 'ذكر' },
   { id: 'female', title: 'أنثى' },
-];
-
-// Hardcoded to match the mobile app — there is no endpoint for this list.
-const SERVICE_OPTIONS = [
-  { id: 1, name: 'نقل' },
-  { id: 2, name: 'تخزين' },
-  { id: 3, name: 'عمالة' },
 ];
 
 const DOB_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -167,9 +168,9 @@ function cityMessage(options, page) {
   return buildListMessage('city', 'الرجاء اختيار المدينة:', 'اختر المدينة', 'المدن', options, page);
 }
 
-function categoryMessage(options, page, isSupplier) {
-  const bodyText = isSupplier ? 'الرجاء اختيار الخدمة:' : 'الرجاء اختيار الفئة:';
-  const sectionTitle = isSupplier ? 'الخدمات' : 'الفئات';
+function categoryMessage(options, page, isServiceProvider) {
+  const bodyText = isServiceProvider ? 'الرجاء اختيار الخدمة:' : 'الرجاء اختيار الفئة:';
+  const sectionTitle = isServiceProvider ? 'الخدمات' : 'الفئات';
   return buildListMessage('cat', bodyText, 'اختر', sectionTitle, options, page);
 }
 
@@ -266,35 +267,37 @@ async function advanceFlow(session, input) {
       if (!matched) return { retry: true, message: cityMessage(options, 0) };
 
       const { _cityOptions, ...rest } = data;
-      const isSupplier = rest.type === 'supplier';
-      const categoryOptions = isSupplier ? SERVICE_OPTIONS : await mahsoolApiClient.getSubCategories();
+      const isServiceProvider = rest.type === 'service_provider';
+      const categoryOptions = isServiceProvider
+        ? await mahsoolApiClient.getServices()
+        : await mahsoolApiClient.getSubCategories();
 
       return {
         step: 'category',
         data: { ...rest, city: matched.id, _categoryOptions: categoryOptions },
-        message: categoryMessage(categoryOptions, 0, isSupplier),
+        message: categoryMessage(categoryOptions, 0, isServiceProvider),
       };
     }
 
     case 'category': {
       const options = data._categoryOptions || [];
-      const isSupplier = data.type === 'supplier';
+      const isServiceProvider = data.type === 'service_provider';
       const parsed = parseListReply(input, 'cat');
-      if (!parsed) return { retry: true, message: categoryMessage(options, 0, isSupplier) };
+      if (!parsed) return { retry: true, message: categoryMessage(options, 0, isServiceProvider) };
 
       if (parsed.more !== undefined) {
-        return { step: 'category', data, message: categoryMessage(options, parsed.more, isSupplier) };
+        return { step: 'category', data, message: categoryMessage(options, parsed.more, isServiceProvider) };
       }
 
       const matched = options.find((o) => Number(o.id) === parsed.value);
-      if (!matched) return { retry: true, message: categoryMessage(options, 0, isSupplier) };
+      if (!matched) return { retry: true, message: categoryMessage(options, 0, isServiceProvider) };
 
       const { _categoryOptions, ...rest } = data;
       const finalData = { ...rest };
 
       // Register endpoint expects both keys on every request; the one that
       // doesn't apply to this type is sent as [] rather than omitted.
-      if (isSupplier) {
+      if (isServiceProvider) {
         finalData.service_id = [matched.id];
         finalData.subCategory_id = [];
       } else {
