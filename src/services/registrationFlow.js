@@ -1,7 +1,8 @@
 const mahsoolApiClient = require('./mahsoolApiClient');
 
-// Steps run in order: type -> name -> gender -> dob -> location -> city -> category -> done
-// type/gender use reply buttons (<=3 options, fits WhatsApp's button limit).
+// Steps run in order: type -> name -> noOfMembers? -> gender? -> dob? -> location -> city -> category -> done
+// type uses a list message (5 options > 3-button limit).
+// gender uses reply buttons (2 options, fits WhatsApp's button limit).
 // location/city/category use list messages with real API ids embedded
 // directly in the row id as "<prefix>:<id>", so a reply never needs to be
 // re-mapped against a stored position — we just read the id back out.
@@ -15,35 +16,37 @@ const mahsoolApiClient = require('./mahsoolApiClient');
 // as [] rather than omitted, matching what the website actually sends.
 // name/dob stay free text — WhatsApp has no interactive widget for open text.
 
-// Mirrors the .refine() conditions in the real RegisterDto schema:
-// dob/gender are required for everyone EXCEPT Cooperative, Supplier, and
-// ServiceProvider. Of the three types this bot supports, service_provider
-// skips them — buyer and farmer both still need dob + gender.
+// Mirrors the .refine() conditions in the real RegisterDto schema.
 // Kept as a table (not scattered if/else) so a schema change is a one-line
 // edit here instead of a step-logic rework.
-//
-// NOTE: originally this table had `supplier` as the third type, based on
-// what the mobile app appeared to support. Confirmed against the live
-// website (teerab.mahsool.sd/signup) that its dropdown has no option that
-// sends type: "supplier" at all — the "شركة" (company) option actually
-// sends type: "service_provider", backed by a real GET /services endpoint.
-// service_provider has identical field requirements to supplier in the
-// schema, so this was a clean swap once discovered.
 const TYPE_RULES = {
   service_provider: { needsDob: false, needsGender: false },
   buyer: { needsDob: true, needsGender: true },
   farmer: { needsDob: true, needsGender: true },
+  cooperative: { needsDob: false, needsGender: false, needsNoOfMembers: true },
 };
 
 function rulesFor(type) {
-  return TYPE_RULES[type] || { needsDob: true, needsGender: true }; // safe default if an unexpected type slips through
+  return TYPE_RULES[type] || { needsDob: true, needsGender: true };
 }
 
 const TYPE_OPTIONS = [
-  { id: 'service_provider', title: 'شركة' },
-  { id: 'buyer', title: 'مشتري' },
-  { id: 'farmer', title: 'مزارع' },
+  { id: 'service_provider', name: 'شركة' },
+  { id: 'buyer', name: 'مشتري' },
+  { id: 'farmer', name: 'مزارع' },
+  { id: 'cooperative_agri', name: 'تعاونية زراعية إنتاجية' },
+  { id: 'cooperative_consumer', name: 'تعاونية إستهلاكية' },
 ];
+
+// Maps bot-internal selection ids to real API type values + any extra fields
+// that are baked into which option the user picked.
+const TYPE_MAP = {
+  service_provider: { type: 'service_provider' },
+  buyer: { type: 'buyer' },
+  farmer: { type: 'farmer' },
+  cooperative_agri: { type: 'cooperative', cooperativeType: 'agriculture' },
+  cooperative_consumer: { type: 'cooperative', cooperativeType: 'consumer' },
+};
 
 const GENDER_OPTIONS = [
   { id: 'male', title: 'ذكر' },
@@ -126,6 +129,15 @@ function parseDob(rawInput) {
   return isValidCalendarDate(year, month, day) ? `${year}-${pad2(month)}-${pad2(day)}` : null;
 }
 
+function parseNoOfMembers(rawInput) {
+  if (!rawInput) return null;
+  const str = normalizeDigits(rawInput.trim());
+  if (!/^\d+$/.test(str)) return null;
+  const num = Number(str);
+  if (!Number.isInteger(num) || num < 1 || num > 99999) return null;
+  return num;
+}
+
 // WhatsApp list messages cap at 10 rows total. Reserve one row for "more"
 // when there's another page, so real options per page = 9.
 const LIST_PAGE_SIZE = 9;
@@ -195,12 +207,14 @@ function parseListReply(input, prefix) {
 }
 
 function typeMessage() {
-  return {
-    kind: 'buttons',
-    bodyText:
-      'مرحباً! يبدو أنه ليس لديك حساب مسجل بعد على منصة محصول.\nدعنا ننشئ حساباً جديداً. الرجاء اختيار نوع الحساب:',
-    buttons: TYPE_OPTIONS.map((o) => ({ id: `type:${o.id}`, title: o.title })),
-  };
+  return buildListMessage(
+    'type',
+    'مرحباً! يبدو أنه ليس لديك حساب مسجل بعد على منصة محصول.\nدعنا ننشئ حساباً جديداً. الرجاء اختيار نوع الحساب:',
+    'اختر نوع الحساب',
+    'أنواع الحسابات',
+    TYPE_OPTIONS,
+    0
+  );
 }
 
 function nameMessage() {
@@ -219,6 +233,13 @@ function dobMessage() {
   return {
     kind: 'text',
     text: 'الرجاء إدخال تاريخ الميلاد، مثال: 1990-05-20 أو 20-05-1990',
+  };
+}
+
+function noOfMembersMessage() {
+  return {
+    kind: 'text',
+    text: 'الرجاء إدخال عدد الأعضاء:',
   };
 }
 
@@ -289,7 +310,8 @@ async function advanceFlow(session, input) {
     case 'type': {
       const value = matchButton(input, 'type', TYPE_OPTIONS);
       if (!value) return { retry: true, message: typeMessage() };
-      return { step: 'name', data: { ...data, type: value }, message: nameMessage() };
+      const mapped = TYPE_MAP[value];
+      return { step: 'name', data: { ...data, ...mapped }, message: nameMessage() };
     }
 
     case 'name': {
@@ -299,6 +321,9 @@ async function advanceFlow(session, input) {
       const newData = { ...data, name: input.text.trim() };
       const rules = rulesFor(newData.type);
 
+      if (rules.needsNoOfMembers) {
+        return { step: 'noOfMembers', data: newData, message: noOfMembersMessage() };
+      }
       if (rules.needsGender) {
         return { step: 'gender', data: newData, message: genderMessage() };
       }
@@ -329,6 +354,26 @@ async function advanceFlow(session, input) {
         return { retry: true, message: dobMessage() };
       }
       return enterLocationStep({ ...data, dob: normalized });
+    }
+
+    case 'noOfMembers': {
+      if (input.type !== 'text') {
+        return { retry: true, message: noOfMembersMessage() };
+      }
+      const value = parseNoOfMembers(input.text);
+      if (!value) {
+        return { retry: true, message: noOfMembersMessage() };
+      }
+      const newData = { ...data, NoOfMembers: value };
+      const rules = rulesFor(newData.type);
+
+      if (rules.needsGender) {
+        return { step: 'gender', data: newData, message: genderMessage() };
+      }
+      if (rules.needsDob) {
+        return { step: 'dob', data: newData, message: dobMessage() };
+      }
+      return enterLocationStep(newData);
     }
 
     case 'location': {

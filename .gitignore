@@ -1,3 +1,5 @@
 node_modules/
 .env
 progress.md
+cooperative-type-support-plan.md
+AGENTS.md

@@ -137,10 +137,12 @@ async function completeRegistration(phonenumber, data) {
     location: data.location,
     city: data.city,
     type: data.type,
-    gender: data.gender, // undefined (and dropped by JSON.stringify) for types that don't collect it, e.g. supplier
+    gender: data.gender,
     dob: data.dob ? toRegisterDob(data.dob) : undefined,
-    subCategory_id: data.subCategory_id, // always present; [] when type is supplier
-    service_id: data.service_id, // always present; [] when type isn't supplier
+    cooperativeType: data.cooperativeType,
+    NoOfMembers: data.NoOfMembers,
+    subCategory_id: data.subCategory_id,
+    service_id: data.service_id,
   };
 
   try {
